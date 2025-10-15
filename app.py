@@ -6,6 +6,7 @@ import streamlit.components.v1 as components
 import os
 import re
 import plotly.express as px
+from itertools import combinations
 from collections import defaultdict
 
 # --- PAGE CONFIGURATION ---
@@ -20,8 +21,10 @@ if not os.path.exists('temp'):
     os.makedirs('temp')
 
 def split_authors(author_string):
+    # This function now handles cases where there's only one author more gracefully.
     if not isinstance(author_string, str):
         return []
+    # We still split by comma or semicolon for cases that have them.
     authors = [a.strip() for a in re.split(r'[,;]', author_string) if a.strip()]
     return authors
 
@@ -29,6 +32,7 @@ def split_authors(author_string):
 def load_data():
     try:
         df = pd.read_csv('data_terpetakan_final.csv')
+        # We use the original_author field directly now for grouping, as per your logic.
         df['authors_list'] = df['original_author'].apply(split_authors)
         df['publication_year'] = pd.to_numeric(df['publication_year'], errors='coerce')
         df.dropna(subset=['publication_year'], inplace=True)
@@ -99,64 +103,78 @@ if df is not None:
             st.plotly_chart(fig4, use_container_width=True)
 
     elif page == "Researcher Collaboration Network":
-        st.title("🤝 Researcher Collaboration Network Map")
-        st.markdown("This network shows all co-author relationships. Use the dropdown to **highlight** researchers associated with a specific SDG.")
+        st.title("🤝 Potential Collaboration Network by SDG")
+        st.markdown("""
+        This network connects researchers who have published work on the **same SDG topic**. 
+        Use the dropdown to **filter the view** and see the specific collaboration cluster for each SDG.
+        """)
+
+        # --- NEW LOGIC INSPIRED BY YOUR SCRIPT ---
         
-        # --- Build the full collaboration graph ---
+        # 1. Group unique authors for each SDG
+        df_mapped = df[df['sdg_mapping'].notna()].copy()
+        collaboration_groups = df_mapped.groupby('sdg_mapping')['original_author'].unique()
+
+        # 2. Build the graph based on shared SDGs
         G = nx.Graph()
-        collaboration_df = df[df['authors_list'].str.len() > 1]
-        for _, row in collaboration_df.iterrows():
-            authors = row['authors_list']
-            for i in range(len(authors)):
-                for j in range(i + 1, len(authors)):
-                    G.add_edge(authors[i], authors[j])
+        # Map authors to all their SDGs for hover info
+        author_sdg_map = defaultdict(set)
         
-        # --- NEW: Display Graph Statistics for Debugging ---
+        for sdg, authors in collaboration_groups.items():
+            # Clean up author names within the group
+            unique_authors_in_sdg = {author.strip() for author_str in authors for author in split_authors(author_str)}
+            
+            # Add SDG info to each author
+            for author in unique_authors_in_sdg:
+                author_sdg_map[author].add(sdg)
+
+            # Create edges between all authors in the same SDG group
+            for author1, author2 in combinations(unique_authors_in_sdg, 2):
+                if G.has_edge(author1, author2):
+                    G[author1][author2]['weight'] += 1
+                else:
+                    G.add_edge(author1, author2, weight=1)
+
+        # 3. Prepare data for filtering
+        sdg_list = ["- Show All -"] + sorted(df['sdg_mapping'].dropna().unique().tolist())
+        selected_sdg = st.selectbox('Select an SDG to filter the network:', sdg_list)
+
+        # 4. Filter the graph if an SDG is selected
+        if selected_sdg != "- Show All -":
+            # Get all authors related to the selected SDG
+            authors_in_selected_sdg = {author.strip() for author_str in collaboration_groups.get(selected_sdg, []) for author in split_authors(author_str)}
+            # Create a subgraph containing only these authors
+            Sub_G = G.subgraph(authors_in_selected_sdg)
+        else:
+            Sub_G = G
+
         st.subheader("Graph Statistics")
         stats_col1, stats_col2 = st.columns(2)
-        stats_col1.metric("Total Researchers (Nodes)", G.number_of_nodes())
-        stats_col2.metric("Total Collaborations (Edges)", G.number_of_edges())
+        stats_col1.metric("Researchers Displayed (Nodes)", Sub_G.number_of_nodes())
+        stats_col2.metric("Potential Collaborations (Edges)", Sub_G.number_of_edges())
 
-        if G.number_of_nodes() == 0:
-            st.error("The collaboration graph is empty. This means no papers with more than one author were found. Please check that author names in your CSV are separated by a comma (,) or semicolon (;).")
-        else:
-            # Map every researcher to the SDGs they've published in
-            researcher_sdg_map = defaultdict(set)
-            for _, row in df.iterrows():
-                sdg = row['sdg_mapping']
-                if pd.notna(sdg):
-                    for author in row['authors_list']:
-                        researcher_sdg_map[author].add(sdg)
-
-            # Add SDG info to each node in the graph for hover text
-            for node in G.nodes():
-                sdgs = researcher_sdg_map.get(node, set())
+        if Sub_G.number_of_nodes() > 0:
+            # Add hover data to nodes
+            for node in Sub_G.nodes():
+                sdgs = author_sdg_map.get(node, set())
                 title = f"{node}<br><b>SDGs:</b> {', '.join(sorted(list(sdgs)))}" if sdgs else node
-                G.nodes[node]['title'] = title
-                G.nodes[node]['sdgs'] = sdgs
-            
-            # Create the Pyvis network
-            net = Network(height='750px', width='100%', notebook=True, cdn_resources='in_line', directed=False)
-            net.from_nx(G)
+                Sub_G.nodes[node]['title'] = title
 
-            st.subheader("Highlight Network by SDG")
-            sdg_list = ["- Show All -"] + sorted(df['sdg_mapping'].dropna().unique().tolist())
-            selected_sdg = st.selectbox('Select an SDG to highlight researchers:', sdg_list)
-            
-            if selected_sdg != "- Show All -":
-                for node in net.nodes:
-                    if selected_sdg in G.nodes[node].get('sdgs', set()):
-                        node['color'] = '#FF4B4B' # Bright Red
-                        node['size'] = 25
-                    else:
-                        node['color'] = '#97C2FC' # Light Blue
-                        node['size'] = 15
-            
+            # 5. Visualize the (potentially filtered) graph
+            net = Network(height='750px', width='100%', notebook=True, cdn_resources='in_line', directed=False)
+            net.from_nx(Sub_G)
+
+            # Increase node size based on degree (number of connections)
+            for node in net.nodes:
+                node['size'] = 10 + Sub_G.degree(node['id']) * 3
+
             try:
-                path = os.path.join('temp', 'full_collaboration_graph.html')
+                path = os.path.join('temp', 'sdg_collaboration_graph.html')
                 net.save_graph(path)
                 with open(path, 'r', encoding='utf-8') as HtmlFile:
                     source_code = HtmlFile.read()
                     components.html(source_code, height=800, scrolling=True)
             except Exception as e:
                 st.error(f"An error occurred while generating the graph: {e}")
+        else:
+            st.warning(f"No potential collaborations found for '{selected_sdg}'. This might mean there is only one author publishing on this topic in the dataset.")
