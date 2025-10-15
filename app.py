@@ -77,7 +77,6 @@ if df is not None:
             st.plotly_chart(fig1, use_container_width=True)
 
             st.subheader("🏆 Top 15 Most Prolific Researchers")
-            # Explode the authors_list to count publications per author
             all_authors_df = df.explode('authors_list')
             top_authors = all_authors_df['authors_list'].value_counts().nlargest(15).sort_values(ascending=True).reset_index()
             top_authors.columns = ['Researcher', 'Count']
@@ -102,9 +101,8 @@ if df is not None:
     elif page == "Researcher Collaboration Network":
         st.title("🤝 Researcher Collaboration Network Map")
         st.markdown("This network shows all co-author relationships. Use the dropdown to **highlight** researchers associated with a specific SDG.")
-
-        # --- REVISED LOGIC ---
-        # 1. Build the full collaboration graph from all multi-author papers
+        
+        # --- Build the full collaboration graph ---
         G = nx.Graph()
         collaboration_df = df[df['authors_list'].str.len() > 1]
         for _, row in collaboration_df.iterrows():
@@ -113,46 +111,52 @@ if df is not None:
                 for j in range(i + 1, len(authors)):
                     G.add_edge(authors[i], authors[j])
         
-        # 2. Map every researcher to the SDGs they've published in
-        researcher_sdg_map = defaultdict(set)
-        for _, row in df.iterrows():
-            sdg = row['sdg_mapping']
-            if pd.notna(sdg):
-                for author in row['authors_list']:
-                    researcher_sdg_map[author].add(sdg)
+        # --- NEW: Display Graph Statistics for Debugging ---
+        st.subheader("Graph Statistics")
+        stats_col1, stats_col2 = st.columns(2)
+        stats_col1.metric("Total Researchers (Nodes)", G.number_of_nodes())
+        stats_col2.metric("Total Collaborations (Edges)", G.number_of_edges())
 
-        # 3. Add SDG info to each node in the graph for hover text
-        for node in G.nodes():
-            sdgs = researcher_sdg_map.get(node, set())
-            G.nodes[node]['title'] = f"{node}\nSDGs: {', '.join(sorted(list(sdgs)))}"
-            G.nodes[node]['sdgs'] = sdgs
-        
-        # 4. Create the Pyvis network and add highlighting functionality
-        net = Network(height='700px', width='100%', notebook=True, cdn_resources='in_line', select_menu=True)
-        net.from_nx(G)
-
-        st.subheader("Highlight Network by SDG")
-        sdg_list = ["- Show All -"] + sorted(df['sdg_mapping'].dropna().unique().tolist())
-        selected_sdg = st.selectbox('Select an SDG to highlight researchers:', sdg_list)
-        
-        if selected_sdg != "- Show All -":
-            for node in net.nodes:
-                if selected_sdg in node.get('title', ''):
-                    node['color'] = 'red'
-                    node['size'] = 25
-                else:
-                    node['color'] = '#97c2fc' # A light blue color for non-highlighted nodes
-                    node['size'] = 15
+        if G.number_of_nodes() == 0:
+            st.error("The collaboration graph is empty. This means no papers with more than one author were found. Please check that author names in your CSV are separated by a comma (,) or semicolon (;).")
         else:
-             for node in net.nodes:
-                node['color'] = '#97c2fc'
-                node['size'] = 15
+            # Map every researcher to the SDGs they've published in
+            researcher_sdg_map = defaultdict(set)
+            for _, row in df.iterrows():
+                sdg = row['sdg_mapping']
+                if pd.notna(sdg):
+                    for author in row['authors_list']:
+                        researcher_sdg_map[author].add(sdg)
 
-        try:
-            path = os.path.join('temp', 'full_collaboration_graph.html')
-            net.save_graph(path)
-            with open(path, 'r', encoding='utf-8') as HtmlFile:
-                source_code = HtmlFile.read()
-                components.html(source_code, height=710, scrolling=True)
-        except Exception as e:
-            st.error(f"An error occurred while generating the graph: {e}")
+            # Add SDG info to each node in the graph for hover text
+            for node in G.nodes():
+                sdgs = researcher_sdg_map.get(node, set())
+                title = f"{node}<br><b>SDGs:</b> {', '.join(sorted(list(sdgs)))}" if sdgs else node
+                G.nodes[node]['title'] = title
+                G.nodes[node]['sdgs'] = sdgs
+            
+            # Create the Pyvis network
+            net = Network(height='750px', width='100%', notebook=True, cdn_resources='in_line', directed=False)
+            net.from_nx(G)
+
+            st.subheader("Highlight Network by SDG")
+            sdg_list = ["- Show All -"] + sorted(df['sdg_mapping'].dropna().unique().tolist())
+            selected_sdg = st.selectbox('Select an SDG to highlight researchers:', sdg_list)
+            
+            if selected_sdg != "- Show All -":
+                for node in net.nodes:
+                    if selected_sdg in G.nodes[node].get('sdgs', set()):
+                        node['color'] = '#FF4B4B' # Bright Red
+                        node['size'] = 25
+                    else:
+                        node['color'] = '#97C2FC' # Light Blue
+                        node['size'] = 15
+            
+            try:
+                path = os.path.join('temp', 'full_collaboration_graph.html')
+                net.save_graph(path)
+                with open(path, 'r', encoding='utf-8') as HtmlFile:
+                    source_code = HtmlFile.read()
+                    components.html(source_code, height=800, scrolling=True)
+            except Exception as e:
+                st.error(f"An error occurred while generating the graph: {e}")
