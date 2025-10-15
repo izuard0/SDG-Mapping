@@ -39,8 +39,13 @@ def load_data():
         df['publication_year'] = pd.to_numeric(df['publication_year'], errors='coerce')
         df.dropna(subset=['publication_year'], inplace=True)
         df['publication_year'] = df['publication_year'].astype(int)
-        # Clean journal data for better counting
-        df['journal'] = df['journal'].str.strip().str.title()
+        
+        # --- FIX APPLIED HERE ---
+        # Convert journal column to string type BEFORE using .str accessor to prevent AttributeError
+        df['journal'] = df['journal'].astype(str).str.strip().str.title()
+        # Replace blank/NaN values (which become 'Nan' after astype(str)) with a proper label
+        df['journal'].replace(['Nan', ''], 'Not Available', inplace=True)
+
         return df
     except FileNotFoundError:
         st.error("Error: 'data_terpetakan_final.csv' not found. Please ensure the file is in the same repository folder.")
@@ -95,14 +100,11 @@ if df is not None:
             st.plotly_chart(fig1, use_container_width=True)
 
             st.subheader("🏆 Top 15 Journals by Publication Count")
-            if not df['journal'].dropna().empty:
-                top_journals = df['journal'].value_counts().nlargest(15).sort_values(ascending=True).reset_index()
-                top_journals.columns = ['Journal', 'Count']
-                fig3 = px.bar(top_journals, y='Journal', x='Count', orientation='h', text_auto=True)
-                fig3.update_layout(yaxis={'categoryorder':'total ascending'})
-                st.plotly_chart(fig3, use_container_width=True)
-            else:
-                st.warning("Journal data is not available or is empty.")
+            top_journals = df['journal'].value_counts().nlargest(15).sort_values(ascending=True).reset_index()
+            top_journals.columns = ['Journal', 'Count']
+            fig3 = px.bar(top_journals, y='Journal', x='Count', orientation='h', text_auto=True)
+            fig3.update_layout(yaxis={'categoryorder':'total ascending'})
+            st.plotly_chart(fig3, use_container_width=True)
 
         with col2:
             st.subheader("🎯 Publication Distribution by SDG")
