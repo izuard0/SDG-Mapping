@@ -6,6 +6,7 @@ import streamlit.components.v1 as components
 import os
 import re
 import plotly.express as px
+from collections import defaultdict
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
@@ -15,63 +16,41 @@ st.set_page_config(
 )
 
 # --- DATA & FUNCTIONS ---
-
-# Create a temporary directory if it doesn't exist
 if not os.path.exists('temp'):
     os.makedirs('temp')
 
-# Function to split author names more reliably
 def split_authors(author_string):
     if not isinstance(author_string, str):
         return []
-    # Splits authors by comma or semicolon
     authors = [a.strip() for a in re.split(r'[,;]', author_string) if a.strip()]
     return authors
 
-# Cached function to load and process data
 @st.cache_data
 def load_data():
     try:
         df = pd.read_csv('data_terpetakan_final.csv')
-        # Clean author data
         df['authors_list'] = df['original_author'].apply(split_authors)
-        # Clean publication year data
         df['publication_year'] = pd.to_numeric(df['publication_year'], errors='coerce')
         df.dropna(subset=['publication_year'], inplace=True)
         df['publication_year'] = df['publication_year'].astype(int)
-        
-        # --- FIX APPLIED HERE ---
-        # Convert journal column to string type BEFORE using .str accessor to prevent AttributeError
         df['journal'] = df['journal'].astype(str).str.strip().str.title()
-        # Replace blank/NaN values (which become 'Nan' after astype(str)) with a proper label
         df['journal'].replace(['Nan', ''], 'Not Available', inplace=True)
-
         return df
     except FileNotFoundError:
-        st.error("Error: 'data_terpetakan_final.csv' not found. Please ensure the file is in the same repository folder.")
+        st.error("Error: 'data_terpetakan_final.csv' not found.")
         return None
 
 df = load_data()
 
 # --- SDG DEFINITIONS ---
 sdg_definitions = {
-    "SDG 1": "No Poverty",
-    "SDG 2": "Zero Hunger",
-    "SDG 3": "Good Health and Well-being",
-    "SDG 4": "Quality Education",
-    "SDG 5": "Gender Equality",
-    "SDG 6": "Clean Water and Sanitation",
-    "SDG 7": "Affordable and Clean Energy",
-    "SDG 8": "Decent Work and Economic Growth",
-    "SDG 9": "Industry, Innovation, and Infrastructure",
-    "SDG 10": "Reduced Inequality",
-    "SDG 11": "Sustainable Cities and Communities",
-    "SDG 12": "Responsible Consumption and Production",
-    "SDG 13": "Climate Action",
-    "SDG 14": "Life Below Water",
-    "SDG 15": "Life on Land",
-    "SDG 16": "Peace, Justice, and Strong Institutions",
-    "SDG 17": "Partnerships for the Goals"
+    "SDG 1": "No Poverty", "SDG 2": "Zero Hunger", "SDG 3": "Good Health and Well-being",
+    "SDG 4": "Quality Education", "SDG 5": "Gender Equality", "SDG 6": "Clean Water and Sanitation",
+    "SDG 7": "Affordable and Clean Energy", "SDG 8": "Decent Work and Economic Growth",
+    "SDG 9": "Industry, Innovation, and Infrastructure", "SDG 10": "Reduced Inequality",
+    "SDG 11": "Sustainable Cities and Communities", "SDG 12": "Responsible Consumption and Production",
+    "SDG 13": "Climate Action", "SDG 14": "Life Below Water", "SDG 15": "Life on Land",
+    "SDG 16": "Peace, Justice, and Strong Institutions", "SDG 17": "Partnerships for the Goals"
 }
 
 # --- SIDEBAR NAVIGATION ---
@@ -79,13 +58,11 @@ st.sidebar.title("Navigation 🗺️")
 page = st.sidebar.radio("Choose a page:", ["General Analysis", "Researcher Collaboration Network"])
 
 with st.sidebar.expander("ℹ️ About the SDGs"):
-    st.write("The 17 Sustainable Development Goals are:")
     for key, value in sdg_definitions.items():
         st.write(f"**{key}**: {value}")
 
 # --- PAGE CONTENT ---
 if df is not None:
-    # PAGE 1: GENERAL ANALYSIS
     if page == "General Analysis":
         st.title("📊 General Publication Analysis Dashboard")
         st.markdown("This page presents general insights from the publication dataset.")
@@ -99,10 +76,12 @@ if df is not None:
             fig1 = px.line(yearly_counts, x='Year', y='Count', markers=True, labels={'Count': 'Number of Publications'})
             st.plotly_chart(fig1, use_container_width=True)
 
-            st.subheader("🏆 Top 15 Journals by Publication Count")
-            top_journals = df['journal'].value_counts().nlargest(15).sort_values(ascending=True).reset_index()
-            top_journals.columns = ['Journal', 'Count']
-            fig3 = px.bar(top_journals, y='Journal', x='Count', orientation='h', text_auto=True)
+            st.subheader("🏆 Top 15 Most Prolific Researchers")
+            # Explode the authors_list to count publications per author
+            all_authors_df = df.explode('authors_list')
+            top_authors = all_authors_df['authors_list'].value_counts().nlargest(15).sort_values(ascending=True).reset_index()
+            top_authors.columns = ['Researcher', 'Count']
+            fig3 = px.bar(top_authors, y='Researcher', x='Count', orientation='h', text_auto=True, labels={'Count': 'Number of Publications'})
             fig3.update_layout(yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig3, use_container_width=True)
 
@@ -120,66 +99,60 @@ if df is not None:
             fig4.update_traces(textposition='inside', textinfo='percent+label')
             st.plotly_chart(fig4, use_container_width=True)
 
-    # PAGE 2: COLLABORATION NETWORK
     elif page == "Researcher Collaboration Network":
         st.title("🤝 Researcher Collaboration Network Map")
-        st.markdown("Choose a visualization type to explore the collaboration network.")
-        st.info("""
-        **Note:** This map is generated by connecting authors who have co-authored a paper. 
-        For this to work, author names in the `original_author` column of your CSV file must be separated by a **comma (,)** or a **semicolon (;)**. 
-        If the graph appears empty, please check your data file's format.
-        """)
+        st.markdown("This network shows all co-author relationships. Use the dropdown to **highlight** researchers associated with a specific SDG.")
 
-        visualization_type = st.selectbox(
-            'Select Visualization Type:',
-            ('By SDG', 'By Researcher')
-        )
+        # --- REVISED LOGIC ---
+        # 1. Build the full collaboration graph from all multi-author papers
+        G = nx.Graph()
+        collaboration_df = df[df['authors_list'].str.len() > 1]
+        for _, row in collaboration_df.iterrows():
+            authors = row['authors_list']
+            for i in range(len(authors)):
+                for j in range(i + 1, len(authors)):
+                    G.add_edge(authors[i], authors[j])
+        
+        # 2. Map every researcher to the SDGs they've published in
+        researcher_sdg_map = defaultdict(set)
+        for _, row in df.iterrows():
+            sdg = row['sdg_mapping']
+            if pd.notna(sdg):
+                for author in row['authors_list']:
+                    researcher_sdg_map[author].add(sdg)
 
-        if visualization_type == 'By SDG':
-            st.subheader('Collaboration Map by SDG')
-            sdg_list = sorted(df['sdg_mapping'].dropna().unique().tolist())
-            selected_sdg = st.selectbox('Select an SDG:', sdg_list)
-            if selected_sdg:
-                df_sdg = df[(df['sdg_mapping'] == selected_sdg) & (df['authors_list'].str.len() > 1)]
-                if df_sdg.empty:
-                    st.warning(f"No collaboration data (>1 author per paper) found for {selected_sdg}. This may be due to data formatting.", icon="⚠️")
+        # 3. Add SDG info to each node in the graph for hover text
+        for node in G.nodes():
+            sdgs = researcher_sdg_map.get(node, set())
+            G.nodes[node]['title'] = f"{node}\nSDGs: {', '.join(sorted(list(sdgs)))}"
+            G.nodes[node]['sdgs'] = sdgs
+        
+        # 4. Create the Pyvis network and add highlighting functionality
+        net = Network(height='700px', width='100%', notebook=True, cdn_resources='in_line', select_menu=True)
+        net.from_nx(G)
+
+        st.subheader("Highlight Network by SDG")
+        sdg_list = ["- Show All -"] + sorted(df['sdg_mapping'].dropna().unique().tolist())
+        selected_sdg = st.selectbox('Select an SDG to highlight researchers:', sdg_list)
+        
+        if selected_sdg != "- Show All -":
+            for node in net.nodes:
+                if selected_sdg in node.get('title', ''):
+                    node['color'] = 'red'
+                    node['size'] = 25
                 else:
-                    G = nx.Graph()
-                    for authors_list in df_sdg['authors_list']:
-                        for i in range(len(authors_list)):
-                            for j in range(i + 1, len(authors_list)):
-                                G.add_edge(authors_list[i], authors_list[j])
-                    net = Network(height='600px', width='100%', notebook=True, cdn_resources='in_line')
-                    net.from_nx(G)
-                    for node in net.nodes:
-                        node['size'] = 15
-                    path = os.path.join('temp', 'graph_sdg.html')
-                    net.save_graph(path)
-                    with open(path, 'r', encoding='utf-8') as HtmlFile:
-                        source_code = HtmlFile.read()
-                        components.html(source_code, height=610)
+                    node['color'] = '#97c2fc' # A light blue color for non-highlighted nodes
+                    node['size'] = 15
+        else:
+             for node in net.nodes:
+                node['color'] = '#97c2fc'
+                node['size'] = 15
 
-        elif visualization_type == 'By Researcher':
-            st.subheader('Collaboration Map by Researcher')
-            all_authors_list = [author for sublist in df['authors_list'].dropna() for author in sublist]
-            all_authors = sorted(list(set(all_authors_list)))
-            selected_author = st.selectbox('Select a Researcher:', all_authors)
-            if selected_author:
-                df_author = df[df['authors_list'].apply(lambda authors: selected_author in authors and len(authors) > 1)]
-                if df_author.empty:
-                    st.warning(f"No collaboration data found for '{selected_author}'. This could mean all their publications are single-authored or the data is not formatted with separators.", icon="⚠️")
-                else:
-                    G = nx.Graph()
-                    G.add_node(selected_author, color='red', size=25)
-                    for authors_list in df_author['authors_list']:
-                        for co_author in authors_list:
-                            if co_author != selected_author:
-                                G.add_node(co_author, size=15)
-                                G.add_edge(selected_author, co_author)
-                    net = Network(height='600px', width='100%', notebook=True, cdn_resources='in_line')
-                    net.from_nx(G)
-                    path = os.path.join('temp', 'graph_researcher.html')
-                    net.save_graph(path)
-                    with open(path, 'r', encoding='utf-8') as HtmlFile:
-                        source_code = HtmlFile.read()
-                        components.html(source_code, height=610)
+        try:
+            path = os.path.join('temp', 'full_collaboration_graph.html')
+            net.save_graph(path)
+            with open(path, 'r', encoding='utf-8') as HtmlFile:
+                source_code = HtmlFile.read()
+                components.html(source_code, height=710, scrolling=True)
+        except Exception as e:
+            st.error(f"An error occurred while generating the graph: {e}")
